@@ -1,166 +1,147 @@
 import socket
 import json
 import threading
-import time
 import sys
 import random
 import os
 
-# --- CONFIGURATION ---
+# ---------------- CONFIG ----------------
 MY_NAME = sys.argv[1]
 MY_IP = sys.argv[2]
 PORT = 8888
-ALPHA = 0.5   # Learning Rate
-GAMMA = 0.9   # Discount Factor
+
+# Q-Learning Params
+ALPHA = 0.5
+GAMMA = 0.9
+EPSILON = 0.1
+
 MODEL_FILE = f"logs/q_table_{MY_NAME}.json"
-
-# Q-Table Structure: { 'Destination_IP': { 'Neighbor_IP': Estimated_Cost } }
 Q_TABLE = {}
-NEIGHBORS = [] 
+NEIGHBORS = []
 
-# --- UTILITIES (Neighbor Discovery) ---
+# ---------------- HELPERS ----------------
 
 def get_neighbors_from_ip(my_ip, grid_size=3):
-    """Calculates neighbor IPs for a grid topology (10.0.r.c)."""
-    try:
-        parts = my_ip.split('.')
-        row = int(parts[2])
-        col = int(parts[3])
-    except:
-        return []
+    parts = my_ip.split('.')
+    # Adjust for the +1 offset we added in topo.py
+    # IP 10.0.1.1 corresponds to grid index (0,0)
+    row, col = int(parts[2]) - 1, int(parts[3]) - 1
 
-    neighbor_ips = []
-    moves = [(-1, 0), (1, 0), (0, -1), (0, 1)] # Up, Down, Left, Right
-    
-    for r_move, c_move in moves:
-        new_r, new_c = row + r_move, col + c_move
-        if 0 <= new_r < grid_size and 0 <= new_c < grid_size:
-            neighbor_ips.append(f"10.0.{new_r}.{new_c}")
-            
-    return neighbor_ips
-
-# --- Q-LEARNING CORE ---
+    neighbors = []
+    for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:
+        nr, nc = row + dr, col + dc
+        if 0 <= nr < grid_size and 0 <= nc < grid_size:
+            # Reconstruct neighbor IP with +1 offset
+            neighbors.append(f"10.0.{nr+1}.{nc+1}")
+    return neighbors
 
 def load_model():
     global Q_TABLE
     if os.path.exists(MODEL_FILE):
         try:
-            with open(MODEL_FILE, 'r') as f:
+            with open(MODEL_FILE) as f:
                 Q_TABLE = json.load(f)
-            print(f"[{MY_NAME}] Loaded Q-Table from disk.")
         except:
-            print(f"[{MY_NAME}] Error loading model, starting fresh.")
+            Q_TABLE = {}
 
 def save_model():
     with open(MODEL_FILE, 'w') as f:
         json.dump(Q_TABLE, f)
 
-def get_best_neighbor(destination):
-    """Decides where to send the packet next."""
-    # Initialize if we've never heard of this destination
-    if destination not in Q_TABLE:
-        Q_TABLE[destination] = {n: 5.0 for n in NEIGHBORS} # Default high cost
-    
-    # Epsilon-Greedy: 10% chance to explore a random path
-    if random.random() < 0.1:
-        return random.choice(NEIGHBORS)
-    
-    # Exploitation: Pick the neighbor with the lowest estimated cost
-    estimates = Q_TABLE[destination]
-    # Filter only valid current neighbors
-    valid_estimates = {k: v for k, v in estimates.items() if k in NEIGHBORS}
-    
-    if not valid_estimates:
-        return random.choice(NEIGHBORS)
-        
-    return min(valid_estimates, key=valid_estimates.get)
+def init_dest(dest):
+    if dest not in Q_TABLE:
+        Q_TABLE[dest] = {n: 5.0 for n in NEIGHBORS}
 
-def update_q_table(source_neighbor, destination, neighbor_best_estimate):
-    """The Bellman Equation: Updates the Q-Value based on feedback."""
-    if destination not in Q_TABLE:
-        Q_TABLE[destination] = {n: 5.0 for n in NEIGHBORS}
-    
-    if source_neighbor not in Q_TABLE[destination]:
-         Q_TABLE[destination][source_neighbor] = 5.0
+# ---------------- CORE LOGIC ----------------
 
-    current_q = Q_TABLE[destination][source_neighbor]
+def choose_next_hop(dest, sender_ip):
+    init_dest(dest)
+    # Don't send back to the node that sent it to us!
+    candidates = [n for n in NEIGHBORS if n != sender_ip]
     
-    # Reward structure: Cost = 1 hop (simplified cost)
-    step_cost = 1 
-    
-    # New_Q = Old_Q + Alpha * ( (Reward + Gamma * Future) - Old_Q )
-    new_q = current_q + ALPHA * ( (step_cost + GAMMA * neighbor_best_estimate) - current_q )
-    
-    Q_TABLE[destination][source_neighbor] = new_q
-    
-    # Auto-save model occasionally
-    save_model() 
+    if not candidates:
+        return None
 
-# --- PACKET HANDLING ---
+    # Epsilon-Greedy Exploration
+    if random.random() < EPSILON:
+        choice = random.choice(candidates)
+    else:
+        # Exploit: Choose neighbor with lowest cost
+        choice = min(candidates, key=lambda n: Q_TABLE[dest].get(n, 5.0))
+    
+    print(f"Next Hop Choice: {choice}", flush=True)
+    return choice
 
-def send_packet(target_ip, data):
+def update_q(source_neighbor, dest, neighbor_est):
+    init_dest(dest)
+    current = Q_TABLE[dest].get(source_neighbor, 5.0)
+    step_cost = 1
+    new_q = current + ALPHA * ((step_cost + GAMMA * neighbor_est) - current)
+    Q_TABLE[dest][source_neighbor] = new_q
+    save_model()
+
+# ---------------- NETWORKING ----------------
+
+def send_packet(target_ip, pkt):
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(json.dumps(data).encode(), (target_ip, PORT))
+        # NO BIND HERE! Let OS handle it.
+        sock.sendto(json.dumps(pkt).encode(), (target_ip, PORT))
+        sock.close()
     except Exception as e:
-        print(f"[{MY_NAME}] Failed to send to {target_ip}: {e}")
+        print(f"[{MY_NAME}] ❌ SEND ERROR to {target_ip}: {e}", flush=True)
 
-def handle_incoming(data, addr):
+def handle_packet(data, addr):
+    # addr is a tuple (ip, port)
+    sender_ip_actual = addr[0] 
+    
     try:
         pkt = json.loads(data.decode())
     except:
         return
-        
-    sender_ip = addr[0]
 
-    # --- TYPE 1: FEEDBACK (Learning Signal) ---
+    # 1. HANDLE FEEDBACK
     if pkt['type'] == 'FEEDBACK':
-        # Neighbor telling us: "It will take me X time to get to Destination D"
-        update_q_table(sender_ip, pkt['for_dest'], pkt['best_estimate'])
+        # sender_ip_actual is the neighbor who gave us feedback
+        print(f"[{MY_NAME}] ⬅️ Feedback from {sender_ip_actual} for {pkt['for_dest']}", flush=True)
+        update_q(sender_ip_actual, pkt['for_dest'], pkt['best_estimate'])
         return
 
-    # --- TYPE 2: DATA (The actual message) ---
-    if pkt['type'] == 'DATA':
-        dest = pkt['destination']
-        
-        # A. Am I the destination?
-        if dest == MY_IP:
-            print(f"[{MY_NAME}] \033[92mPACKET RECEIVED!\033[0m Payload: {pkt['payload']}")
-            return
-
-        # B. I need to forward it.
-        next_hop = get_best_neighbor(dest)
-        
-        # 1. Send FEEDBACK to the Previous Node
-        # "Hey sender, I received your packet for {dest}. My best estimate to get there is X."
-        my_best_est = min(Q_TABLE[dest].values()) if dest in Q_TABLE else 5.0
-        feedback_pkt = {
-            "type": "FEEDBACK",
-            "from_node": MY_IP,
-            "for_dest": dest,
-            "best_estimate": my_best_est
-        }
-        send_packet(sender_ip, feedback_pkt)
-        
-        # 2. Forward the Packet
-        send_packet(next_hop, pkt)
-
-def start_server():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((MY_IP, PORT))
-    print(f"[{MY_NAME}] Router online. IP: {MY_IP}, Neighbors: {NEIGHBORS}")
+    # 2. HANDLE DATA
+    dest = pkt['destination']
     
+    # AM I THE DESTINATION?
+    if dest == MY_IP:
+        print(f"[{MY_NAME}] ✅ RECEIVED: {pkt['payload']}", flush=True)
+        # Send Feedback (Cost = 0)
+        feedback = {"type": "FEEDBACK", "for_dest": dest, "best_estimate": 0}
+        send_packet(sender_ip_actual, feedback)
+        return
+
+    # FORWARDING
+    print(f"[{MY_NAME}] ➡️ Forwarding DATA from {sender_ip_actual} to {dest}", flush=True)
+    next_hop = choose_next_hop(dest, sender_ip_actual)
+    
+    if next_hop:
+        send_packet(next_hop, pkt)
+        
+        # Send Feedback to previous node (Our estimated cost)
+        my_best_est = min(Q_TABLE[dest].values())
+        feedback = {"type": "FEEDBACK", "for_dest": dest, "best_estimate": my_best_est}
+        send_packet(sender_ip_actual, feedback)
+
+def start_router():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Bind to 0.0.0.0 to hear everyone
+    sock.bind(('0.0.0.0', PORT)) 
+
+    print(f"[{MY_NAME}] Online | IP={MY_IP} | Neighbors={NEIGHBORS}", flush=True)
+
     while True:
         data, addr = sock.recvfrom(4096)
-        # Handle in a thread to avoid blocking
-        threading.Thread(target=handle_incoming, args=(data, addr)).start()
+        threading.Thread(target=handle_packet, args=(data, addr), daemon=True).start()
 
 if __name__ == "__main__":
-    # 1. Discover Neighbors
     NEIGHBORS = get_neighbors_from_ip(MY_IP)
-    
-    # 2. Load previous learning
     load_model()
-    
-    # 3. Start Router
-    start_server()
+    start_router()

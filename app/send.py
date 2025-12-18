@@ -3,26 +3,29 @@ import json
 import sys
 import time
 
-# Usage: python3 send.py <ROUTER_IP> <DESTINATION_IP> <MESSAGE>
+# USAGE: python3 send.py <DESTINATION_IP> <MESSAGE>
 
-if len(sys.argv) < 4:
-    print("Usage: python3 send.py <ROUTER_IP> <FINAL_DEST_IP> <MSG>")
+if len(sys.argv) < 3:
+    print("Usage: python3 send.py <DESTINATION_IP> <MESSAGE>")
     sys.exit()
 
-router_ip = sys.argv[1]
-final_dest_ip = sys.argv[2]
-msg_content = sys.argv[3]
+# We always send to the local router on THIS node
+ROUTER_IP = "127.0.0.1" 
 PORT = 8888
+
+final_dest_ip = sys.argv[1]
+msg_content = " ".join(sys.argv[2:])
 
 packet = {
     "type": "DATA",
-    "source": router_ip, 
     "destination": final_dest_ip,
     "payload": msg_content,
     "timestamp": time.time()
 }
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.sendto(json.dumps(packet).encode(), (router_ip, PORT))
-
-print(f"[*] Injected message at {router_ip} --> headed for {final_dest_ip}")
+try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.sendto(json.dumps(packet).encode(), (ROUTER_IP, PORT))
+    print(f"[*] Packet injected! Dest: {final_dest_ip} | Msg: {msg_content}")
+except Exception as e:
+    print(f"[!] Error: {e}")

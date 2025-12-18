@@ -7,64 +7,89 @@ from mininet.log import setLogLevel
 
 class GridTopo(Topo):
     def build(self, n=3):
-        # Create a Grid of Hosts (h0_0 to h2_2)
-        switches = {}
         hosts = {}
         
         # 1. Create Hosts
         for r in range(n):
             for c in range(n):
                 name = f'h{r}_{c}'
-                # Simple IP assignment: 10.0.r.c
-                # MAC address is set deterministically for easier debugging
-                mac = f'00:00:00:00:0{r}:0{c}'
-                host = self.addHost(name, ip=f'10.0.{r}.{c}/24', mac=mac)
+                # We use /24 to isolate them.
+                # We start IPs at .1 (e.g., 10.0.1.1) to avoid invalid .0 addresses
+                ip = f'10.0.{r+1}.{c+1}/24' 
+                mac = f'00:00:00:00:{r+1:02x}:{c+1:02x}'
+                host = self.addHost(name, ip=ip, mac=mac)
                 hosts[(r,c)] = host
                 
-        # 2. Add Links (Horizontal & Vertical)
-        # We add links between hosts to create the grid structure
+        # 2. Add Links 
+        # The order here determines which interface is eth0 vs eth1
         for r in range(n):
             for c in range(n):
-                # Connect to Right Neighbor
+                # Horizontal Link (Right)
                 if c < n-1: 
                     self.addLink(hosts[(r,c)], hosts[(r,c+1)])
-                # Connect to Bottom Neighbor
+                # Vertical Link (Down)
                 if r < n-1: 
                     self.addLink(hosts[(r,c)], hosts[(r+1,c)])
 
-def run():
-    # Clean up any previous runs
-    os.system('mn -c')
+def setup_grid_routes(net, n=3):
+    """
+    Manually set up static routes. This iterates through every link in the network
+    and tells the hosts at both ends exactly how to reach each other.
+    """
+    print("[*] Setting up Static Routes for Grid...")
     
-    # Create logs directory
+    # Map (r,c) to host objects
+    hosts = {}
+    for r in range(n):
+        for c in range(n):
+            hosts[(r,c)] = net.get(f'h{r}_{c}')
+
+    # Iterate through all hosts to find their neighbors and interfaces
+    for host in net.hosts:
+        # Get list of interfaces (excluding loopback)
+        for intf in host.intfList():
+            if intf.name == 'lo': continue
+            
+            # Find the link connected to this interface
+            link = intf.link
+            if not link: continue
+            
+            # Identify the neighbor node
+            node1, node2 = link.intf1.node, link.intf2.node
+            neighbor = node2 if node1 == host else node1
+            
+            # Add a specific route: "To reach neighbor's IP, use this interface"
+            host.cmd(f'ip route add {neighbor.IP()} dev {intf.name}')
+            
+            # Add a static ARP entry so we don't need ARP broadcasts
+            host.cmd(f'arp -s {neighbor.IP()} {neighbor.MAC()}')
+
+def run():
+    os.system('mn -c') # Clean up old run
     if not os.path.exists('logs'):
         os.makedirs('logs')
 
+    # Build Topology
     topo = GridTopo(n=3)
-    net = Mininet(topo=topo, switch=OVSKernelSwitch)
+    net = Mininet(topo=topo, switch=OVSKernelSwitch, controller=None)
     net.start()
 
+    # 🔧 APPLY THE ROUTING FIX
+    setup_grid_routes(net, n=3)
+
     print("\n[+] Network Started. Initializing Q-Routers...")
-    print("[+] Logs for each router will be in the 'logs/' folder.\n")
     
-    # Start the router script on every host
     for host in net.hosts:
-        # Disable default Linux forwarding so our script handles packets
+        # Disable Linux forwarding so our Python script handles the packets
         host.cmd('sysctl -w net.ipv4.ip_forward=0')
         
-        # Run router.py in background
-        # We pass the Host Name and IP as arguments
-        # Output is redirected to a log file for debugging
+        print(f'Starting Router on {host.name} ({host.IP()})...')
         cmd = f'python3 router.py {host.name} {host.IP()} > logs/{host.name}.log 2>&1 &'
         host.cmd(cmd)
 
-    print("[*] Q-Routing Agents are running on all nodes.")
-    print("[*] You can now inject traffic using send.py")
-    print("[*] Type 'exit' to stop the simulation.")
-    
+    print("[*] Q-Routing Agents running.")
+    print("[*] Type 'exit' to stop.")
     CLI(net)
-    
-    print("[-] Stopping network...")
     net.stop()
 
 if __name__ == '__main__':
