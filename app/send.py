@@ -9,7 +9,7 @@ if len(sys.argv) < 3:
     print("Usage: python3 send.py <DESTINATION_IP> <MESSAGE>")
     sys.exit()
 
-# We always send to the local router on THIS node
+# Always send to LOCAL router to start the chain
 ROUTER_IP = "127.0.0.1" 
 PORT = 8888
 
@@ -26,6 +26,6 @@ packet = {
 try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.sendto(json.dumps(packet).encode(), (ROUTER_IP, PORT))
-    print(f"[*] Packet injected! Dest: {final_dest_ip} | Msg: {msg_content}")
+    print(f"[*] Packet injected into local router! Final Dest: {final_dest_ip}")
 except Exception as e:
     print(f"[!] Error: {e}")

@@ -7,88 +7,87 @@ from mininet.log import setLogLevel
 
 class GridTopo(Topo):
     def build(self, n=3):
+        self.grid_n = n
         hosts = {}
         
-        # 1. Create Hosts
+        # 1. Create Hosts with 0.0.0.0
+        # We assign the real IP to the Loopback interface later to fix routing issues.
         for r in range(n):
             for c in range(n):
                 name = f'h{r}_{c}'
-                # We use /24 to isolate them.
-                # We start IPs at .1 (e.g., 10.0.1.1) to avoid invalid .0 addresses
-                ip = f'10.0.{r+1}.{c+1}/24' 
                 mac = f'00:00:00:00:{r+1:02x}:{c+1:02x}'
-                host = self.addHost(name, ip=ip, mac=mac)
+                # Init with 0.0.0.0 so Mininet doesn't create default routes
+                host = self.addHost(name, ip='0.0.0.0', mac=mac)
                 hosts[(r,c)] = host
                 
         # 2. Add Links 
-        # The order here determines which interface is eth0 vs eth1
         for r in range(n):
             for c in range(n):
-                # Horizontal Link (Right)
-                if c < n-1: 
-                    self.addLink(hosts[(r,c)], hosts[(r,c+1)])
-                # Vertical Link (Down)
-                if r < n-1: 
-                    self.addLink(hosts[(r,c)], hosts[(r+1,c)])
+                if c < n-1: self.addLink(hosts[(r,c)], hosts[(r,c+1)]) # Horizontal
+                if r < n-1: self.addLink(hosts[(r,c)], hosts[(r+1,c)]) # Vertical
 
-def setup_grid_routes(net, n=3):
-    """
-    Manually set up static routes. This iterates through every link in the network
-    and tells the hosts at both ends exactly how to reach each other.
-    """
-    print("[*] Setting up Static Routes for Grid...")
+def configure_network(net, n=3):
+    print("[*] Configuring Loopback IPs, Static Routes, and Disabling Filters...")
     
-    # Map (r,c) to host objects
-    hosts = {}
+    # 1. Setup Loopback IPs
     for r in range(n):
         for c in range(n):
-            hosts[(r,c)] = net.get(f'h{r}_{c}')
+            host = net.get(f'h{r}_{c}')
+            # IP Scheme: h0_0 -> 10.0.1.1
+            ip = f'10.0.{r+1}.{c+1}'
+            host.cmd(f'ip addr add {ip}/32 dev lo')
 
-    # Iterate through all hosts to find their neighbors and interfaces
-    for host in net.hosts:
-        # Get list of interfaces (excluding loopback)
-        for intf in host.intfList():
-            if intf.name == 'lo': continue
-            
-            # Find the link connected to this interface
-            link = intf.link
-            if not link: continue
-            
-            # Identify the neighbor node
-            node1, node2 = link.intf1.node, link.intf2.node
-            neighbor = node2 if node1 == host else node1
-            
-            # Add a specific route: "To reach neighbor's IP, use this interface"
-            host.cmd(f'ip route add {neighbor.IP()} dev {intf.name}')
-            
-            # Add a static ARP entry so we don't need ARP broadcasts
-            host.cmd(f'arp -s {neighbor.IP()} {neighbor.MAC()}')
+    # 2. Setup Static Routes for every link
+    for link in net.links:
+        node1, intf1 = link.intf1.node, link.intf1
+        node2, intf2 = link.intf2.node, link.intf2
+        
+        if 'h' not in node1.name or 'h' not in node2.name: continue
+        
+        # Helper to get IP from name hR_C
+        get_ip = lambda h: f"10.0.{int(h.name.split('_')[0][1:])+1}.{int(h.name.split('_')[1])+1}"
+        ip1, ip2 = get_ip(node1), get_ip(node2)
+
+        # Route Node1 -> Node2 via specific interface
+        node1.cmd(f'ip route add {ip2} dev {intf1.name} scope link')
+        node1.cmd(f'arp -s {ip2} {node2.MAC()}')
+        
+        # Route Node2 -> Node1 via specific interface
+        node2.cmd(f'ip route add {ip1} dev {intf2.name} scope link')
+        node2.cmd(f'arp -s {ip1} {node1.MAC()}')
 
 def run():
-    os.system('mn -c') # Clean up old run
-    if not os.path.exists('logs'):
-        os.makedirs('logs')
+    os.system('mn -c') # Clean up previous runs
+    if not os.path.exists('logs'): os.makedirs('logs')
 
-    # Build Topology
     topo = GridTopo(n=3)
     net = Mininet(topo=topo, switch=OVSKernelSwitch, controller=None)
     net.start()
 
-    # 🔧 APPLY THE ROUTING FIX
-    setup_grid_routes(net, n=3)
+    configure_network(net, n=3)
 
     print("\n[+] Network Started. Initializing Q-Routers...")
     
     for host in net.hosts:
-        # Disable Linux forwarding so our Python script handles the packets
+        # 1. Disable IP Forwarding (Python handles it)
         host.cmd('sysctl -w net.ipv4.ip_forward=0')
         
-        print(f'Starting Router on {host.name} ({host.IP()})...')
-        cmd = f'python3 router.py {host.name} {host.IP()} > logs/{host.name}.log 2>&1 &'
+        # 2. 🛑 DISABLE RP_FILTER (CRITICAL FIX)
+        # This prevents Linux from dropping packets that come from "weird" interfaces
+        host.cmd('sysctl -w net.ipv4.conf.all.rp_filter=0')
+        host.cmd('sysctl -w net.ipv4.conf.default.rp_filter=0')
+        for intf in host.intfList():
+            host.cmd(f'sysctl -w net.ipv4.conf.{intf}.rp_filter=0')
+
+        # 3. Start Router Script
+        r, c = map(int, host.name[1:].split('_'))
+        my_ip = f"10.0.{r+1}.{c+1}"
+        
+        print(f'Starting Router on {host.name} ({my_ip})...')
+        cmd = f'python3 router.py {host.name} {my_ip} > logs/{host.name}.log 2>&1 &'
         host.cmd(cmd)
 
-    print("[*] Q-Routing Agents running.")
-    print("[*] Type 'exit' to stop.")
+    print("[*] Q-Routing Agents running. Type 'exit' to stop.")
     CLI(net)
     net.stop()
 
