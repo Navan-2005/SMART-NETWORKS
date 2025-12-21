@@ -55,6 +55,15 @@ def init_dest(dest):
 
 def choose_next_hop(dest, sender_ip):
     init_dest(dest)
+    
+    # --- FIX START ---
+    # 1. IMMEDIATE DELIVERY CHECK
+    # If the destination is one of my neighbors, send it there directly!
+    if dest in NEIGHBORS:
+        print(f"[{MY_NAME}] Destination {dest} is a neighbor. Delivering directly.", flush=True)
+        return dest
+    # --- FIX END ---
+
     # Filter out the node that sent it to us to prevent immediate ping-pong
     candidates = [n for n in NEIGHBORS if n != sender_ip]
     

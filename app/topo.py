@@ -26,7 +26,7 @@ class GridTopo(Topo):
                 if c < n-1: self.addLink(hosts[(r,c)], hosts[(r,c+1)]) # Horizontal
                 if r < n-1: self.addLink(hosts[(r,c)], hosts[(r+1,c)]) # Vertical
 
-def configure_network(net, n=3):
+def configure_network(net, n=4):
     print("[*] Configuring Loopback IPs, Static Routes, and Disabling Filters...")
     
     # 1. Setup Loopback IPs
@@ -50,21 +50,26 @@ def configure_network(net, n=3):
 
         # Route Node1 -> Node2 via specific interface
         node1.cmd(f'ip route add {ip2} dev {intf1.name} scope link')
-        node1.cmd(f'arp -s {ip2} {node2.MAC()}')
+        
+        # 🔴 CHANGE 1: Use intf2.MAC() instead of node2.MAC()
+        # This ensures the ARP entry matches the specific interface the wire connects to.
+        node1.cmd(f'arp -s {ip2} {intf2.MAC()}')
         
         # Route Node2 -> Node1 via specific interface
         node2.cmd(f'ip route add {ip1} dev {intf2.name} scope link')
-        node2.cmd(f'arp -s {ip1} {node1.MAC()}')
+        
+        # 🔴 CHANGE 2: Use intf1.MAC() instead of node1.MAC()
+        node2.cmd(f'arp -s {ip1} {intf1.MAC()}')
 
 def run():
     os.system('mn -c') # Clean up previous runs
     if not os.path.exists('logs'): os.makedirs('logs')
 
-    topo = GridTopo(n=3)
+    topo = GridTopo(n=4)
     net = Mininet(topo=topo, switch=OVSKernelSwitch, controller=None)
     net.start()
 
-    configure_network(net, n=3)
+    configure_network(net, n=4)
 
     print("\n[+] Network Started. Initializing Q-Routers...")
     
