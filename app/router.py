@@ -22,7 +22,7 @@ NEIGHBORS = []
 
 # ---------------- HELPERS ----------------
 
-def get_neighbors_from_ip(my_ip, grid_size=3):
+def get_neighbors_from_ip(my_ip, grid_size=4):
     parts = my_ip.split('.')
     # Adjust for +1 offset (10.0.1.1 is row 0, col 0)
     row, col = int(parts[2]) - 1, int(parts[3]) - 1
